@@ -1,15 +1,12 @@
 import os
-import requests
 import json
-from dotenv import load_dotenv
-
-load_dotenv()
+from js import fetch, Request, Headers
 
 class KISAuth:
     def __init__(self):
-        self.api_key = os.getenv("KIS_API_KEY")
-        self.api_secret = os.getenv("KIS_API_SECRET")
-        self.app_mode = os.getenv("KIS_APP_MODE", "vps")  # Default to vps for safety
+        self.api_key = os.getenv("KIS_API_KEY", "").strip().strip('"').strip("'")
+        self.api_secret = os.getenv("KIS_API_SECRET", "").strip().strip('"').strip("'")
+        self.app_mode = os.getenv("KIS_APP_MODE", "vps").strip().strip('"')
         
         if self.app_mode == "prod":
             self.base_url = "https://openapi.koreainvestment.com:9443"
@@ -17,47 +14,57 @@ class KISAuth:
             self.base_url = "https://openapivts.koreainvestment.com:29443"
             
         self.access_token = None
+        self.last_auth_error = None
 
-    def get_access_token(self):
-        """Fetch a new access token from KIS API."""
+    async def get_access_token(self):
+        """Fetch a new access token using robust text-to-json parsing."""
         url = f"{self.base_url}/oauth2/tokenP"
-        headers = {"content-type": "application/json"}
-        body = {
+        headers = Headers.new()
+        headers.set("content-type", "application/json")
+        
+        body = json.dumps({
             "grant_type": "client_credentials",
             "appkey": self.api_key,
             "appsecret": self.api_secret
-        }
+        })
+        
+        request = Request.new(url, method="POST", headers=headers, body=body)
         
         try:
-            response = requests.post(url, headers=headers, data=json.dumps(body))
-            response.raise_for_status()
-            data = response.json()
-            self.access_token = data.get("access_token")
+            response = await fetch(request)
+            raw_text = await response.text()
+            
+            try:
+                data = json.loads(raw_text)
+                # Now 'data' is a true Python dict
+                if isinstance(data, dict):
+                    self.access_token = data.get("access_token")
+                    if not self.access_token:
+                        self.last_auth_error = data.get("error_description", raw_text)
+                else:
+                    self.last_auth_error = f"Unexpected response format: {raw_text}"
+            except Exception as e:
+                self.last_auth_error = f"JSON Parse Error: {str(e)} | Raw: {raw_text}"
+                
             return self.access_token
         except Exception as e:
-            print(f"[ERROR] Failed to get access token: {e}")
+            self.last_auth_error = f"Network Error: {str(e)}"
             return None
 
-    def get_headers(self, tr_id=None):
-        """Prepare common headers for KIS API requests."""
+    async def get_headers(self, tr_id=None):
+        """Prepare headers, ensuring token is available."""
         if not self.access_token:
-            self.get_access_token()
+            token = await self.get_access_token()
+            if not token:
+                raise Exception(f"KIS Auth Error: {self.last_auth_error}")
             
         headers = {
             "Content-Type": "application/json",
             "authorization": f"Bearer {self.access_token}",
             "appkey": self.api_key,
             "appsecret": self.api_secret,
+            "custtype": "P",
         }
         if tr_id:
             headers["tr_id"] = tr_id
         return headers
-
-if __name__ == "__main__":
-    # Simple test
-    auth = KISAuth()
-    token = auth.get_access_token()
-    if token:
-        print(f"[SUCCESS] Access token obtained: {token[:10]}...")
-    else:
-        print("[FAIL] Authentication check failed. Check your .env file.")
